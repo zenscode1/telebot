@@ -15,4 +15,6 @@ RUN pip install --no-cache-dir python-telegram-bot requests pycountry playwright
 # Install Chromium via Playwright
 RUN playwright install chromium
 COPY bot.py .
+COPY bot_data.db .
+COPY domains.ini .
 CMD ["python", "bot.py"]
